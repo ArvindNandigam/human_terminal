@@ -3,5 +3,5 @@ python -m venv venv
 call venv\Scripts\activate
 pip install -r requirements.txt
 echo Setup complete!
-echo Run: python hcmd/main.py
+echo Run: python -m hcmd "list files"
 pause

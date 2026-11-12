@@ -1,350 +1,343 @@
-import warnings
+"""Natural-language interpretation for hcmd.
 
-warnings.filterwarnings(
-    "ignore",
-    message=".*weights_only=False.*",
-    category=FutureWarning
-)
+Trained local models are used when available.  A deterministic parser remains
+available for installation, help, and common command workflows when model
+artifacts are not installed.
+"""
+
+from __future__ import annotations
+
 import os
-
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
-os.environ["HF_HUB_OFFLINE"] = "1"
-
-import torch
-import subprocess
 import re
-from transformers import (
-    AutoTokenizer,
-    AutoModelForSequenceClassification,
-    AutoModelForQuestionAnswering
-)
-from hcmd.core.rename_model import DualSpanQA
+import subprocess
+from pathlib import Path
+from typing import Any, Optional
 
 from ..constants import (
+    DST_SPAN_MODEL_PATH,
+    GIT_ADD_MODEL_PATH,
+    GIT_CHECKOUT_MODEL_PATH,
+    GIT_CLONE_MODEL_PATH,
+    INTENT_CONF_THRESHOLD,
+    INTENT_MODEL_PATH,
+    NAVIGATION_SPAN_MODEL_PATH,
+    OBJECT_SPAN_MODEL_PATH,
+    RENAME_SPAN_MODEL_PATH,
+    SRC_SPAN_MODEL_PATH,
+    SPAN_CONF_THRESHOLD,
+    TARGET_SPAN_MODEL_PATH,
+)
+from .intent_rules import rule_intent
+from .memory import memory
+from .patterns import detect_pattern
+
+MODEL_PATHS = (
     INTENT_MODEL_PATH,
     NAVIGATION_SPAN_MODEL_PATH,
     SRC_SPAN_MODEL_PATH,
-    TARGET_SPAN_MODEL_PATH,
     DST_SPAN_MODEL_PATH,
     OBJECT_SPAN_MODEL_PATH,
     RENAME_SPAN_MODEL_PATH,
-    INTENT_CONF_THRESHOLD,
-    SPAN_CONF_THRESHOLD,
     GIT_ADD_MODEL_PATH,
     GIT_CHECKOUT_MODEL_PATH,
-    GIT_CLONE_MODEL_PATH
+    GIT_CLONE_MODEL_PATH,
+    TARGET_SPAN_MODEL_PATH,
 )
 
-from hcmd.core.intent_rules import rule_intent
-from hcmd.core.memory import memory
-from hcmd.core.patterns import detect_pattern
+INTENT_VERBS = {
+    "CREATE_FILE": ("create file", "create a file", "make file", "make a file", "new file", "touch"),
+    "DELETE_FILE": ("delete file", "delete", "remove file", "remove", "erase"),
+    "MOVE_FILE": ("move", "relocate"),
+    "COPY_FILE": ("copy", "duplicate"),
+    "RENAME_FILE": ("rename", "change filename"),
+    "CREATE_DIR": ("create directory", "make directory", "new directory", "create folder", "make folder", "new folder", "mkdir"),
+    "DELETE_DIR": ("delete directory", "remove directory", "erase directory", "delete folder", "remove folder", "erase folder", "rmdir"),
+    "NAVIGATION": ("go to", "navigate to", "change directory to", "cd "),
+    "GIT_ADD": ("git add", "stage "),
+    "GIT_COMMIT": ("git commit", "commit"),
+    "GIT_CHECKOUT": ("git checkout", "checkout"),
+    "GIT_BRANCH": ("git branch", "branch"),
+    "GIT_CLONE": ("git clone", "clone"),
+    "GIT_STATUS": ("git status", "status"),
+    "GIT_LOG": ("git log", "log"),
+    "GIT_PULL": ("git pull", "pull"),
+    "GIT_PUSH": ("git push", "push"),
+    "GIT_RESET": ("git reset", "reset"),
+    "GIT_STASH": ("git stash", "stash"),
+    "PROCESS_KILL": ("kill process", "terminate process", "kill ", "terminate "),
+    "PROCESS_LIST": ("list processes", "show running processes", "tasklist"),
+    "SYSTEM_INFO": ("system info", "system information", "hostname", "whoami"),
+    "NETWORK_INFO": ("network info", "network configuration", "ipconfig", "ip address"),
+    "PWD": ("where am i", "current directory", "print working directory", "pwd"),
+    "LIST_FILES": ("list files", "show files", "list directory", "show directory", "ls", "dir"),
+    "READ_FILE": ("read file", "show contents", "cat "),
+}
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# --------------------------------------------------
-# Load models
-# --------------------------------------------------
+def _models_available() -> bool:
+    return all(Path(path).is_dir() for path in MODEL_PATHS)
 
-intent_tokenizer = AutoTokenizer.from_pretrained(INTENT_MODEL_PATH,local_files_only=True)
-intent_model = AutoModelForSequenceClassification.from_pretrained(
-    INTENT_MODEL_PATH,local_files_only=True
-).to(DEVICE).eval()
 
-span_tokenizer = AutoTokenizer.from_pretrained(NAVIGATION_SPAN_MODEL_PATH,local_files_only=True)
+def _load_models() -> Optional[dict[str, Any]]:
+    if not _models_available():
+        return None
+    try:
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        import torch
+        from transformers import (
+            AutoModelForQuestionAnswering,
+            AutoModelForSequenceClassification,
+            AutoTokenizer,
+        )
+        from .rename_model import DualSpanQA
 
-nav_model = AutoModelForQuestionAnswering.from_pretrained(
-    NAVIGATION_SPAN_MODEL_PATH,local_files_only=True
-).to(DEVICE).eval()
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        intent_tokenizer = AutoTokenizer.from_pretrained(INTENT_MODEL_PATH, local_files_only=True)
+        intent_model = AutoModelForSequenceClassification.from_pretrained(
+            INTENT_MODEL_PATH, local_files_only=True
+        ).to(device).eval()
+        span_tokenizer = AutoTokenizer.from_pretrained(
+            NAVIGATION_SPAN_MODEL_PATH, local_files_only=True
+        )
+        qa_paths = {
+            "nav_model": NAVIGATION_SPAN_MODEL_PATH,
+            "src_model": SRC_SPAN_MODEL_PATH,
+            "dst_model": DST_SPAN_MODEL_PATH,
+            "object_model": OBJECT_SPAN_MODEL_PATH,
+            "target_model": TARGET_SPAN_MODEL_PATH,
+            "git_add_model": GIT_ADD_MODEL_PATH,
+            "git_checkout_model": GIT_CHECKOUT_MODEL_PATH,
+            "git_clone_model": GIT_CLONE_MODEL_PATH,
+        }
+        models = {
+            "intent_tokenizer": intent_tokenizer,
+            "intent_model": intent_model,
+            "span_tokenizer": span_tokenizer,
+            "device": device,
+        }
+        for name, path in qa_paths.items():
+            models[name] = AutoModelForQuestionAnswering.from_pretrained(
+                path, local_files_only=True
+            ).to(device).eval()
+        rename_model = DualSpanQA("distilbert-base-uncased").to(device)
+        rename_model.load_state_dict(
+            torch.load(
+                Path(RENAME_SPAN_MODEL_PATH) / "pytorch_model.bin",
+                map_location=device,
+            )
+        )
+        models["rename_model"] = rename_model.eval()
+        return models
+    except (ImportError, OSError, RuntimeError, ValueError):
+        return None
 
-src_model = AutoModelForQuestionAnswering.from_pretrained(
-    SRC_SPAN_MODEL_PATH,local_files_only=True
-).to(DEVICE).eval()
 
-dst_model = AutoModelForQuestionAnswering.from_pretrained(
-    DST_SPAN_MODEL_PATH,local_files_only=True
-).to(DEVICE).eval()
+MODELS = _load_models()
 
-object_model = AutoModelForQuestionAnswering.from_pretrained(
-    OBJECT_SPAN_MODEL_PATH,local_files_only=True
-).to(DEVICE).eval()
 
-target_model = AutoModelForQuestionAnswering.from_pretrained(
-    TARGET_SPAN_MODEL_PATH,local_files_only=True
-).to(DEVICE).eval()
-
-rename_model = DualSpanQA("distilbert-base-uncased").to(DEVICE)
-rename_model.load_state_dict(
-    torch.load(f"{RENAME_SPAN_MODEL_PATH}/pytorch_model.bin", map_location=DEVICE)
-)
-rename_model.eval()
-
-git_add_model = AutoModelForQuestionAnswering.from_pretrained(
-    GIT_ADD_MODEL_PATH,local_files_only=True
-).to(DEVICE).eval()
-
-git_checkout_model = AutoModelForQuestionAnswering.from_pretrained(
-    GIT_CHECKOUT_MODEL_PATH,local_files_only=True
-).to(DEVICE).eval()
-
-git_clone_model = AutoModelForQuestionAnswering.from_pretrained(
-    GIT_CLONE_MODEL_PATH,local_files_only=True
-).to(DEVICE).eval()
-
-# --------------------------------------------------
-# Helpers
-# --------------------------------------------------
-
-def in_git_repo():
+def in_git_repo() -> bool:
     try:
         subprocess.check_output(
             ["git", "rev-parse", "--is-inside-work-tree"],
-            stderr=subprocess.DEVNULL
+            stderr=subprocess.DEVNULL,
         )
         return True
-    except Exception:
+    except (OSError, subprocess.CalledProcessError):
         return False
 
 
-def _extract_span(text: str, model):
-    inputs = span_tokenizer(
-        text,
-        return_tensors="pt",
-        return_offsets_mapping=True,
-        truncation=True
-    )
-
-    offsets = inputs.pop("offset_mapping")[0]
-    inputs = {k: v.to(DEVICE) for k, v in inputs.items()}
-
-    with torch.no_grad():
-        out = model(**inputs)
-
-    start_probs = torch.softmax(out.start_logits, dim=-1)[0]
-    end_probs = torch.softmax(out.end_logits, dim=-1)[0]
-
-    s = torch.argmax(start_probs).item()
-    e = torch.argmax(end_probs).item()
-
-    if e < s:
-        return None, 0.0
-
-    span = text[offsets[s][0]:offsets[e][1]].strip()
-    conf = (start_probs[s] * end_probs[e]).item()
-    return span, conf
+def _first_match(patterns: tuple[str, ...], text: str) -> Optional[str]:
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip().strip('"\'') if match.groups() else None
+    return None
 
 
-def _extract_rename_spans(text: str, model):
-    enc = span_tokenizer(
-        text,
-        return_tensors="pt",
-        return_offsets_mapping=True,
-        truncation=True
-    )
-
-    offsets = enc.pop("offset_mapping")[0]
-    enc = {k: v.to(DEVICE) for k, v in enc.items()}
-
-    with torch.no_grad():
-        out = model(**enc)
-
-    def decode(start, end):
-        s = torch.argmax(start).item()
-        e = torch.argmax(end).item()
-        if e < s:
-            return None, 0.0
-        span = text[offsets[s][0]:offsets[e][1]].strip()
-        conf = (torch.softmax(start, -1)[0][s] *
-                torch.softmax(end, -1)[0][e]).item()
-        return span, conf
-
-    src, src_conf = decode(out["src_start_logits"], out["src_end_logits"])
-    dst, dst_conf = decode(out["dst_start_logits"], out["dst_end_logits"])
-    return src, src_conf, dst, dst_conf
+def _fallback_intent(text: str) -> Optional[str]:
+    normalized = text.lower().strip()
+    rule = rule_intent(text)
+    if rule:
+        return rule
+    if normalized in ("ls", "dir", "list", "list files", "show files"):
+        return "LIST_FILES"
+    for intent, phrases in INTENT_VERBS.items():
+        if any(phrase in normalized for phrase in phrases):
+            return intent
+    return None
 
 
-# --------------------------------------------------
-# MAIN INTERPRETER
-# --------------------------------------------------
-from hcmd.core.step_parser import split_into_steps
-INTENT_VERBS = {
-    "CREATE_FILE": ["create", "make", "new"],
-    "DELETE_FILE": ["delete", "remove", "erase"],
-    "MOVE_FILE": ["move"],
-    "COPY_FILE": ["copy"],
-    "RENAME_FILE": ["rename"],
-    "CREATE_DIR": ["create directory", "make directory", "new directory", "create folder", "make folder", "new folder"],
-    "DELETE_DIR": ["delete directory", "remove directory", "erase directory", "delete folder", "remove folder", "erase folder"],
-    "NAVIGATION": ["go to", "navigate to", "change directory to", "cd to" ],
-    "GIT_ADD": ["git add", "stage"],
-    "GIT_COMMIT": ["git commit", "commit"],
-    "GIT_CHECKOUT": ["git checkout", "checkout"],
-    "GIT_BRANCH": ["git branch", "branch"],
-    "GIT_CLONE": ["git clone", "clone"],
-    "PROCESS_KILL": ["kill", "terminate", "stop process"],
-    "GIT_REPO_STATUS": ["git repository", "git repo", "repository", "repo"],
-    "PROCESS": ["process", "application", "app"],
-    "GIT_STATUS": ["git status", "status"],
-    "GIT_STASH": ["git stash", "stash"]
-}
-def contains_explicit_verb(text: str) -> bool:
-    t = text.lower()
-    for verbs in INTENT_VERBS.values():
-        for v in verbs:
-            if re.search(rf"\b{v}\b", t):
-                return True
-    return False
+def _fallback_spans(intent: str, text: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    quoted = re.findall(r'"([^"]+)"|\'([^\']+)\'', text)
+    quoted_values = [a or b for a, b in quoted]
 
-def interpret_plan(text: str) -> dict:
-    parts = [p.strip() for p in re.split(r"\band\b", text) if p.strip()]
-    steps = []
-
-    base_intent = None
-
-    for i, part in enumerate(parts):
-        result = interpret(part)
-
-        if not result.get("ok"):
-            return result
-
-        if i == 0:
-            base_intent = result["intent"]
-        else:
-            # 🔒 ONLY inherit intent if NO explicit verb
-            if not contains_explicit_verb(part):
-                result["intent"] = base_intent
-            else:
-                base_intent = result["intent"]  # update base intent
-
-        steps.append(result)
-
-    return {
-        "ok": True,
-        "steps": steps
-    }
-
-def interpret(text: str) -> dict:
-    t = text.lower().strip()
-
-    # ---------- PRONOUN DELETE (Phase 9) ----------
-    if re.fullmatch(r"(delete|remove|erase)\s+(it|this|that)", t):
-        if memory.recent_objects:
-            return {
-                "ok": True,
-                "intent": "DELETE_FILE",
-                "confidence": 1.0,
-                "path": memory.recent_objects[-1],
-                "from_pronoun": True
-            }
-        return {"ok": False, "reason": "Nothing to delete"}
-
-
-    else:
-        intent = None
-        intent_conf = 0.0
-
-        # ---------- RULE INTENT ----------
-        rule = rule_intent(text)
-        if rule:
-            intent = rule
-            intent_conf = 1.0
-
-        # ---------- GIT FOLLOW-UPS (Phase 8) ----------
-        elif in_git_repo() and memory.last_git_intent and "git" not in t:
-            if re.search(r"\bbranch\b", t):
-                intent = "GIT_BRANCH"
-                intent_conf = 1.0
-            elif re.search(r"\bcheckout\b", t):
-                intent = "GIT_CHECKOUT"
-                intent_conf = 1.0
-            elif re.search(r"\badd\b", t):
-                intent = "GIT_ADD"
-                intent_conf = 1.0
-            elif re.search(r"\bcommit\b", t):
-                intent = "GIT_COMMIT"
-                intent_conf = 1.0
-
-        # ---------- ML FALLBACK ----------
-        if intent is None:
-            inputs = intent_tokenizer(text, return_tensors="pt").to(DEVICE)
-            with torch.no_grad():
-                logits = intent_model(**inputs).logits
-
-            probs = torch.softmax(logits, dim=-1)[0]
-            idx = torch.argmax(probs).item()
-            intent_conf = probs[idx].item()
-            intent = intent_model.config.id2label[idx]
-
-            if intent_conf < INTENT_CONF_THRESHOLD:
-                return {"ok": False, "reason": "Low intent confidence"}
-
-    result = {
-        "ok": True,
-        "intent": intent,
-        "confidence": intent_conf
-    }
-
-    print("DEBUG INTENT:", intent)
-
-    # ---------- PATTERNS ----------
-    if intent in ("DELETE_FILE", "MOVE_FILE", "COPY_FILE"):
-        pattern = detect_pattern(text)
-        if isinstance(pattern, str) and any(c in pattern for c in "*?"):
-            result["pattern"] = pattern
-
-    # ---------- SPANS ----------
-    if intent == "NAVIGATION":
-        path, conf = _extract_span(text, nav_model)
-        if conf >= SPAN_CONF_THRESHOLD:
-            result["path"] = path
-
-    elif intent in ("MOVE_FILE", "COPY_FILE"):
-        result["src"], _ = _extract_span(text, src_model)
-        result["dst"], _ = _extract_span(text, dst_model)
-
+    if intent in {"MOVE_FILE", "COPY_FILE"}:
+        match = re.search(r"\b(?:move|copy|relocate|duplicate)\s+(.+?)\s+(?:to|into)\s+(.+)$", text, re.I)
+        if match:
+            result.update(src=match.group(1).strip().strip('"\' '), dst=match.group(2).strip().strip('"\' '))
     elif intent == "RENAME_FILE":
-        src, sc, dst, dc = _extract_rename_spans(text, rename_model)
-        if sc >= SPAN_CONF_THRESHOLD:
-            result["src"] = src
-        if dc >= SPAN_CONF_THRESHOLD:
-            result["dst"] = dst
-        if src and dst and src == dst:
-            return {"ok": False, "reason": "Rename source and destination identical"}
-
-    elif intent in ("CREATE_FILE", "DELETE_FILE"):
-        obj, conf = _extract_span(text, object_model)
-        if conf >= SPAN_CONF_THRESHOLD:
-            result["path"] = obj
-
-    elif intent == "CREATE_DIR" or intent == "DELETE_DIR":
-        path, conf = _extract_span(text, nav_model)
-        if conf >= SPAN_CONF_THRESHOLD:
-            result["path"] = path
-
+        match = re.search(r"\brename\s+(.+?)\s+to\s+(.+)$", text, re.I)
+        if match:
+            result.update(src=match.group(1).strip().strip('"\' '), dst=match.group(2).strip().strip('"\' '))
+    elif intent in {"NAVIGATION", "CREATE_DIR", "DELETE_DIR"}:
+        match = re.search(r"(?:to|directory|folder|mkdir|cd)\s+(.+)$", text, re.I)
+        if match:
+            result["path"] = match.group(1).strip().strip('"\' ')
+    elif intent in {"CREATE_FILE", "DELETE_FILE", "READ_FILE"}:
+        if quoted_values:
+            result["path"] = quoted_values[-1]
+        else:
+            match = re.search(
+                r"(?:file|delete|remove|erase|touch|cat)\s+(?:named\s+)?([^\s]+)",
+                text,
+                re.I,
+            )
+            if match:
+                result["path"] = match.group(1).strip().strip('"\' ')
     elif intent == "GIT_ADD":
-        path, conf = _extract_span(text, git_add_model)
-        if conf >= SPAN_CONF_THRESHOLD:
-            result["path"] = path
-
+        match = re.search(r"(?:git\s+add|stage)\s+(.+)$", text, re.I)
+        if match:
+            result["path"] = match.group(1).strip().strip('"\' ')
     elif intent == "GIT_CHECKOUT":
-        branch, conf = _extract_span(text, git_checkout_model)
-        if conf >= SPAN_CONF_THRESHOLD:
-            result["branch"] = branch
-
+        match = re.search(r"(?:git\s+checkout|checkout)\s+(.+)$", text, re.I)
+        if match:
+            result["branch"] = match.group(1).strip().strip('"\' ')
     elif intent == "GIT_CLONE":
-        repo, conf = _extract_span(text, git_clone_model)
-        if conf >= SPAN_CONF_THRESHOLD:
-            result["repo"] = repo
-
+        match = re.search(r"(?:git\s+clone|clone)(?:\s+repository)?\s+(?:from\s+)?(.+)$", text, re.I)
+        if match:
+            result["repo"] = match.group(1).strip().strip('"\' ')
     elif intent == "PROCESS_KILL":
-        target, conf = _extract_span(text, target_model)
-        if conf >= SPAN_CONF_THRESHOLD:
-            result["target"] = target
-    # ---------- MEMORY FALLBACK ----------
-    if intent in ("DELETE_FILE", "DELETE_DIR") and not result.get("path"):
-        result["path"] = memory.last_path
+        match = re.search(r"(?:kill|terminate)(?:\s+process)?\s+(.+)$", text, re.I)
+        if match:
+            result["target"] = match.group(1).strip().strip('"\' ')
+    return result
 
-    if intent in ("MOVE_FILE", "COPY_FILE", "RENAME_FILE"):
+
+def _extract_span(text: str, model: Any) -> tuple[Optional[str], float]:
+    import torch
+
+    inputs = MODELS["span_tokenizer"](
+        text, return_tensors="pt", return_offsets_mapping=True, truncation=True
+    )
+    offsets = inputs.pop("offset_mapping")[0]
+    inputs = {key: value.to(MODELS["device"]) for key, value in inputs.items()}
+    with torch.no_grad():
+        output = model(**inputs)
+    start_probs = torch.softmax(output.start_logits, dim=-1)[0]
+    end_probs = torch.softmax(output.end_logits, dim=-1)[0]
+    start = torch.argmax(start_probs).item()
+    end = torch.argmax(end_probs).item()
+    if end < start:
+        return None, 0.0
+    span = text[offsets[start][0]:offsets[end][1]].strip()
+    return span, (start_probs[start] * end_probs[end]).item()
+
+
+def _model_interpret(text: str, intent: str) -> dict[str, Any]:
+    result: dict[str, Any] = {"ok": True, "intent": intent, "confidence": 1.0}
+    models = MODELS
+    if intent == "NAVIGATION":
+        value, confidence = _extract_span(text, models["nav_model"])
+        if confidence >= SPAN_CONF_THRESHOLD:
+            result["path"] = value
+    elif intent in {"MOVE_FILE", "COPY_FILE"}:
+        result["src"], _ = _extract_span(text, models["src_model"])
+        result["dst"], _ = _extract_span(text, models["dst_model"])
+    elif intent == "RENAME_FILE":
+        result["src"], src_conf = _extract_span(text, models["src_model"])
+        result["dst"], dst_conf = _extract_span(text, models["dst_model"])
+        if src_conf < SPAN_CONF_THRESHOLD:
+            result.pop("src", None)
+        if dst_conf < SPAN_CONF_THRESHOLD:
+            result.pop("dst", None)
+    elif intent in {"CREATE_FILE", "DELETE_FILE"}:
+        value, confidence = _extract_span(text, models["object_model"])
+        if confidence >= SPAN_CONF_THRESHOLD:
+            result["path"] = value
+    elif intent in {"CREATE_DIR", "DELETE_DIR"}:
+        value, confidence = _extract_span(text, models["nav_model"])
+        if confidence >= SPAN_CONF_THRESHOLD:
+            result["path"] = value
+    elif intent == "GIT_ADD":
+        value, confidence = _extract_span(text, models["git_add_model"])
+        if confidence >= SPAN_CONF_THRESHOLD:
+            result["path"] = value
+    elif intent == "GIT_CHECKOUT":
+        value, confidence = _extract_span(text, models["git_checkout_model"])
+        if confidence >= SPAN_CONF_THRESHOLD:
+            result["branch"] = value
+    elif intent == "GIT_CLONE":
+        value, confidence = _extract_span(text, models["git_clone_model"])
+        if confidence >= SPAN_CONF_THRESHOLD:
+            result["repo"] = value
+    elif intent == "PROCESS_KILL":
+        value, confidence = _extract_span(text, models["target_model"])
+        if confidence >= SPAN_CONF_THRESHOLD:
+            result["target"] = value
+    return result
+
+
+def interpret(text: str) -> dict[str, Any]:
+    normalized = text.lower().strip()
+    if re.fullmatch(r"(delete|remove|erase)\s+(it|this|that)", normalized):
+        if not memory.recent_objects:
+            return {"ok": False, "reason": "Nothing to delete"}
+        return {
+            "ok": True,
+            "intent": "DELETE_FILE",
+            "confidence": 1.0,
+            "path": memory.recent_objects[-1],
+            "from_pronoun": True,
+        }
+
+    intent = _fallback_intent(text)
+    if intent is None and MODELS is not None:
+        import torch
+
+        inputs = MODELS["intent_tokenizer"](text, return_tensors="pt").to(MODELS["device"])
+        with torch.no_grad():
+            probabilities = torch.softmax(MODELS["intent_model"](**inputs).logits, dim=-1)[0]
+        index = torch.argmax(probabilities).item()
+        confidence = probabilities[index].item()
+        if confidence >= INTENT_CONF_THRESHOLD:
+            intent = MODELS["intent_model"].config.id2label[index]
+    if intent is None:
+        return {"ok": False, "reason": "Unable to identify a supported command"}
+
+    result = (
+        _model_interpret(text, intent)
+        if MODELS is not None and _models_available()
+        else {"ok": True, "intent": intent, "confidence": 1.0, **_fallback_spans(intent, text)}
+    )
+    result.setdefault("pattern", detect_pattern(text))
+    if intent in {"DELETE_FILE", "DELETE_DIR"} and not result.get("path"):
+        result["path"] = memory.last_path
+    if intent in {"MOVE_FILE", "COPY_FILE", "RENAME_FILE"}:
         result.setdefault("src", memory.last_src)
         result.setdefault("dst", memory.last_dst)
-
+    if intent == "RENAME_FILE" and result.get("src") == result.get("dst"):
+        return {"ok": False, "reason": "Rename source and destination identical"}
     return result
+
+
+def interpret_plan(text: str) -> dict[str, Any]:
+    parts = [part.strip() for part in re.split(r"\band\b", text, flags=re.IGNORECASE) if part.strip()]
+    steps = []
+    base_intent = None
+    for index, part in enumerate(parts):
+        result = interpret(part)
+        if not result.get("ok"):
+            return result
+        if index and not any(
+            re.search(rf"\b{re.escape(verb.strip())}\b", part, re.I)
+            for verbs in INTENT_VERBS.values()
+            for verb in verbs
+            if verb.strip()
+        ):
+            result["intent"] = base_intent
+        else:
+            base_intent = result["intent"]
+        steps.append(result)
+    return {"ok": True, "steps": steps}

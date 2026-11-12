@@ -3,4 +3,4 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 echo "Setup complete!"
-echo "Run: python hcmd/main.py"
+echo "Run: python -m hcmd \"list files\""

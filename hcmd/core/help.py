@@ -26,6 +26,7 @@ Try:
   hcmd help pronouns
   hcmd help git
   hcmd help explain
+  hcmd benchmark
 """)
         return
 
@@ -83,6 +84,19 @@ Shows:
 • resolved pronouns
 • execution plan
 • safety checks
+""")
+
+    elif topic == "metrics":
+        print("""
+Performance:
+  hcmd benchmark
+    Measures interpretation latency for representative safe commands.
+
+  hcmd "list files" --dry-run --metrics
+    Reports end-to-end command handling time without executing a command.
+
+Metrics include sample count, success rate, average latency, median latency,
+p95 latency, and interpretation throughput.
 """)
 
     else:

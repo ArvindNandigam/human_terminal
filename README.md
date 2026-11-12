@@ -102,8 +102,13 @@ chmod +x setup_linux.sh
 ### ▶ Run
 
 ```bash
-python hcmd/main.py
+python -m hcmd "list files"
 ```
+
+If trained model directories are present, hcmd uses them for intent and span
+inference. A deterministic local parser is used automatically when those
+artifacts are unavailable, so installation and common workflows still work
+from a clean checkout.
 
 ### 🌍 Make It Global (Optional)
 
@@ -305,6 +310,29 @@ The project includes scripts for training custom intent and span extraction mode
 pytest
 ```
 
+The repository includes focused regression tests for fallback interpretation,
+Git span extraction, multi-step planning, cross-platform command generation,
+and performance metric reporting.
+
+### Performance metrics
+
+Run the safe interpretation benchmark:
+
+```bash
+python -m hcmd benchmark
+```
+
+Measure one command without executing it:
+
+```bash
+python -m hcmd "list files" --dry-run --metrics
+```
+
+The benchmark reports sample count, success rate, average latency, median
+latency, p95 latency, and interpretation throughput. These metrics measure
+the local interpretation pipeline; they do not represent shell execution
+latency or transformer accuracy.
+
 ### Code Quality
 
 ```bash
@@ -313,6 +341,14 @@ isort .        # Import sorting
 flake8         # Linting
 mypy .         # Type checking
 ```
+
+Install all runtime and development dependencies with:
+
+```bash
+pip install -e ".[dev]"
+```
+
+The runtime dependencies are also listed in `requirements.txt`.
 
 ## Supported Intents (Complete Reference)
 

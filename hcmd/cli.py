@@ -1,5 +1,7 @@
+import json
 import sys
 import os
+import time
 
 from hcmd.core.executor import CommandExecutor
 from hcmd.core.context_resolver import resolve_context
@@ -12,6 +14,7 @@ from hcmd.core.memory import memory
 from hcmd.core.pattern_executor import resolve_pattern
 from hcmd.core.rollback import build_rollback
 from hcmd.core.help import show_help
+from hcmd.core.metrics import benchmark
 
 
 # --------------------------------------------------
@@ -97,6 +100,14 @@ def build_command(intent: str, data: dict, ctx: SystemContext) -> str | None:
             else f'mkdir "{name}"'
         )
 
+    if intent == "READ_FILE":
+        name = normalize_path(data.get("path"), ctx)
+        return (
+            f'Get-Content -LiteralPath "{name}"'
+            if os_type == OS.WINDOWS
+            else f'cat "{name}"'
+        ) if name else None
+
     if intent == "DELETE_FILE":
         target = normalize_path(data.get("path"), ctx)
         if not target:
@@ -168,6 +179,10 @@ def build_command(intent: str, data: dict, ctx: SystemContext) -> str | None:
         return "git reset"
     if intent == "GIT_STASH":
         return "git stash"
+    if intent == "GIT_COMMIT":
+        return "git commit"
+    if intent == "GIT_REPO_STATUS":
+        return "git rev-parse --is-inside-work-tree"
     if intent == "GIT_ADD":
         return f'git add "{data.get("path")}"'
     if intent == "GIT_CHECKOUT":
@@ -190,8 +205,12 @@ def main() -> int:
     if dry_run:
         sys.argv.remove("--dry-run")
 
+    metrics_enabled = "--metrics" in sys.argv
+    if metrics_enabled:
+        sys.argv.remove("--metrics")
+
     if len(sys.argv) < 2:
-        print("Usage: hcmd <command> [--dry-run] [--explain]")
+        print("Usage: hcmd <command> [--dry-run] [--explain] [--metrics]")
         return 1
 
     text = " ".join(sys.argv[1:])
@@ -202,7 +221,20 @@ def main() -> int:
         show_help(parts[1] if len(parts) > 1 else None)
         return 0
 
+    if text.strip().lower() == "benchmark":
+        commands = [
+            "list files",
+            "where am i",
+            "create file benchmark.txt",
+            "move benchmark.txt to backup",
+            "git status",
+        ]
+        result = benchmark(lambda command: interpret_plan(command).get("ok", False), commands)
+        print(json.dumps(result, indent=2))
+        return 0 if result["success_rate"] == 1.0 else 1
+
     ctx = resolve_context()
+    started_at = time.perf_counter()
 
     # ---------- ROLLBACK ----------
     if text.strip().lower() == "rollback":
@@ -236,7 +268,12 @@ def main() -> int:
         print("I will execute the following steps:")
         for i, s in enumerate(steps, 1):
             print(f"{i}. {s['intent']}")
-        if input("Proceed? [y/N]: ").lower() != "y":
+        try:
+            proceed = input("Proceed? [y/N]: ").lower()
+        except EOFError:
+            print("ERROR: Confirmation was unavailable in this environment")
+            return 1
+        if proceed != "y":
             return 1
 
     for step in steps:
@@ -249,7 +286,15 @@ def main() -> int:
             print(f"CLARIFICATION REQUIRED: {clarification.reason}")
             for i, opt in enumerate(clarification.options, 1):
                 print(f"{i}) {opt}")
-            step["path"] = clarification.options[int(input("> ")) - 1]
+            try:
+                selection = int(input("> ")) - 1
+            except (EOFError, ValueError):
+                print("ERROR: A valid clarification choice is required")
+                return 1
+            if not 0 <= selection < len(clarification.options):
+                print("ERROR: Clarification choice is out of range")
+                return 1
+            step["path"] = clarification.options[selection]
 
         cmd = build_command(intent, step, ctx)
         if not cmd:
@@ -272,7 +317,12 @@ def main() -> int:
             continue
 
         if not safety.safe and not dry_run:
-            if input(f"{safety.warning} Proceed? [y/N]: ").lower() != "y":
+            try:
+                proceed = input(f"{safety.warning} Proceed? [y/N]: ").lower()
+            except EOFError:
+                print("ERROR: Confirmation was unavailable in this environment")
+                return 1
+            if proceed != "y":
                 return 1
 
         if dry_run:
@@ -285,6 +335,9 @@ def main() -> int:
             return 1
         if out:
             print(out)
+
+        if intent.startswith("GIT_"):
+            memory.last_git_intent = intent
 
         # ---------- MEMORY (SINGLE SOURCE OF TRUTH) ----------
         if intent in ("CREATE_FILE", "DELETE_FILE", "CREATE_DIR", "DELETE_DIR"):
@@ -328,6 +381,15 @@ def main() -> int:
         return 0
 
     memory.save()
+    if metrics_enabled:
+        elapsed_ms = (time.perf_counter() - started_at) * 1000
+        print(json.dumps({
+            "command": text,
+            "steps": len(steps),
+            "elapsed_ms": round(elapsed_ms, 3),
+            "dry_run": dry_run,
+            "executed": not explain and not dry_run,
+        }, indent=2))
     return 0
 
 

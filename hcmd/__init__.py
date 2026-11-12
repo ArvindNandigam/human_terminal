@@ -19,11 +19,9 @@ __all__ = [
     'get_os',
     'get_shell',
     'get_system_directory',
-    'CommandGenerator',
     'CommandExecutor',
     'validate',
     'detector',
-    'generator',
     'executor',
     'validator'
 ]

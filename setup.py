@@ -11,7 +11,7 @@ setup(
     description="Convert natural language to terminal commands",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/hcmd",
+    url="https://github.com/ArvindNandigam/human_terminal",
     packages=find_packages(),
     entry_points={
         'console_scripts': [
@@ -28,13 +28,14 @@ setup(
         "Topic :: Utilities",
         "Topic :: System :: Shells",
     ],
-    python_requires='>=3.7',
+    python_requires='>=3.10',
     install_requires=[
-        # No external dependencies for now
+        "torch>=2.0",
+        "transformers>=4.30",
     ],
     extras_require={
         'dev': [
-            'pytest>=6.0',
+            'pytest>=7.0',
             'pytest-cov>=2.0',
             'black>=21.7b0',
             'isort>=5.9.0',
