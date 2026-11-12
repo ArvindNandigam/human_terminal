@@ -316,7 +316,7 @@ and performance metric reporting.
 
 ### Performance metrics
 
-Run the safe interpretation benchmark:
+Run the 500-sample safe interpretation benchmark:
 
 ```bash
 python -m hcmd benchmark
@@ -328,10 +328,11 @@ Measure one command without executing it:
 python -m hcmd "list files" --dry-run --metrics
 ```
 
-The benchmark reports sample count, success rate, average latency, median
-latency, p95 latency, and interpretation throughput. These metrics measure
-the local interpretation pipeline; they do not represent shell execution
-latency or transformer accuracy.
+The benchmark runs 10 representative, non-destructive command cases 50 times
+each, for **500 total samples**. It reports sample count, successful samples,
+success rate, average latency, median latency, p95 latency, and interpretation
+throughput. These metrics measure the local interpretation pipeline; they do
+not represent shell execution latency or transformer accuracy.
 
 ### Code Quality
 

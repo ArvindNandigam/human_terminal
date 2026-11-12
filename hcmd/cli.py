@@ -222,14 +222,23 @@ def main() -> int:
         return 0
 
     if text.strip().lower() == "benchmark":
-        commands = [
+        benchmark_cases = [
             "list files",
             "where am i",
             "create file benchmark.txt",
             "move benchmark.txt to backup",
             "git status",
+            "git branch",
+            "git log",
+            "git checkout main",
+            "stage app.py",
+            "read file README.md",
         ]
+        commands = benchmark_cases * 50
         result = benchmark(lambda command: interpret_plan(command).get("ok", False), commands)
+        result["benchmark_type"] = "interpretation_only"
+        result["unique_cases"] = len(benchmark_cases)
+        result["repetitions_per_case"] = 50
         print(json.dumps(result, indent=2))
         return 0 if result["success_rate"] == 1.0 else 1
 
